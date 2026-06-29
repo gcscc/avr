@@ -1,0 +1,85 @@
+#include <avr/io.h>
+#include <stdint.h>
+#include <util/delay.h>
+
+#define F_CPU 16000000UL // Mega clock speed is 16 MHz
+#define BAUD 9600        // Set your baud rate here
+#define MYUBRR ((F_CPU / (16UL * BAUD)) - 1)
+
+void uart_init(unsigned int ubrr) {
+    // Set baud rate
+    UBRR0H = (unsigned char)(ubrr >> 8);
+    UBRR0L = (unsigned char)ubrr;
+    
+    // Enable Receiver and Transmitter
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+    
+    // Set frame format: 8 data bits, 1 stop bit
+    UCSR0C = (1 << UCSZ00) | (1 << UCSZ01);
+}
+
+void uart_transmit(unsigned char data) {
+    // Wait for empty transmit buffer
+    while (!(UCSR0A & (1 << UDRE0)));
+    
+    // Put data into buffer, sends the data
+    UDR0 = data;
+}
+
+void uart_print(const char *s) {
+    // Loop through string characters until the null terminator
+    while (*s) {
+        uart_transmit(*s);
+        s++;
+    }
+}
+
+void uart_print_hex(uint8_t v) {
+    // Split the byte into two nibbles
+    char hex_chars[] = "0123456789ABCDEF";
+    
+    // Transmit the upper 4 bits
+    uart_transmit(hex_chars[(v >> 4) & 0x0F]);
+    
+    // Transmit the lower 4 bits
+    uart_transmit(hex_chars[v & 0x0F]);
+}
+
+int main(void) {
+    // Initialize UART
+    uart_init(MYUBRR);
+
+	DDRA = 0xFF;   // scan
+	DDRL = 0x00;   // MK entrada
+	PORTL = 0x3F;  // pullups em PL0..PL5
+
+	uint8_t last = 0;
+
+	for (;;) {
+
+		for (uint8_t row = 0; row < 8; row++) {
+
+			PORTA = ~(1 << row);
+
+			for (volatile uint16_t d = 0; d < 500; d++)
+				;
+
+			uint8_t mk =
+				(PINL >> 0) &
+				0b00111111;
+
+			if (mk != last) {
+
+				uart_print("A=");
+				uart_print_hex(PORTA);
+
+				uart_print(" MK=");
+				uart_print_hex(mk);
+
+				uart_print("\r\n");
+
+				last = mk;
+			}
+		}
+	}
+}
