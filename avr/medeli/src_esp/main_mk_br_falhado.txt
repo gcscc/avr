@@ -1,0 +1,192 @@
+/*
+Mk e Br estão sendo lidos corretamente, mas são impressos errado.
+parece que precisa ter pressionado antes pra começar a funcionar.
+
+o que está bom neste código:
+
+- mk, br, e t estão endereçados corretamente:
+	-	t é onde é lido.
+	- br e mk aparentemente estão trocados -> começa em br e termina em mk (do outro modo não dá leitura de diferença de tempo).
+	- estudar isso pra poder passar para os CI.
+	- esperança no Arduino MEGA? não sei ... 
+*/
+
+#include <avr/io.h>
+#include <stdint.h>
+#include <util/delay.h>
+
+#define F_CPU 16000000UL // Mega clock speed is 16 MHz
+#define BAUD 9600        // Set your baud rate here
+#define MYUBRR ((F_CPU / (16UL * BAUD)) - 1)
+
+void uart_init(unsigned int ubrr) {
+    // Set baud rate
+    UBRR0H = (unsigned char)(ubrr >> 8);
+    UBRR0L = (unsigned char)ubrr;
+    
+    // Enable Receiver and Transmitter
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+    
+    // Set frame format: 8 data bits, 1 stop bit
+    UCSR0C = (1 << UCSZ00) | (1 << UCSZ01);
+}
+
+void uart_transmit(unsigned char data) {
+    // Wait for empty transmit buffer
+    while (!(UCSR0A & (1 << UDRE0)));
+    
+    // Put data into buffer, sends the data
+    UDR0 = data;
+}
+
+void uart_print(const char *s) {
+    // Loop through string characters until the null terminator
+    while (*s) {
+        uart_transmit(*s);
+        s++;
+    }
+}
+
+void uart_print_hex(uint8_t v) {
+    // Split the byte into two nibbles
+    char hex_chars[] = "0123456789ABCDEF";
+    
+    // Transmit the upper 4 bits
+    uart_transmit(hex_chars[(v >> 4) & 0x0F]);
+    
+    // Transmit the lower 4 bits
+    uart_transmit(hex_chars[v & 0x0F]);
+}
+
+
+void uart_print_uint32(uint32_t val) {
+    // A 32-bit unsigned integer can be up to 10 digits long (4,294,967,295)
+    // Plus 1 byte for the null terminator
+    char buffer[11]; 
+    int i = 0;
+
+    // Handle the special case where the value is exactly 0
+    if (val == 0) {
+        uart_transmit('0');
+        return;
+    }
+
+    // Extract digits from right to left
+    while (val > 0) {
+        buffer[i] = (val % 10) + '0'; // Convert single digit to ASCII character
+        val /= 10;                    // Move to the next digit
+        i++;
+    }
+
+    // Print the buffer backwards to show the correct order
+    while (i > 0) {
+        i--;
+        uart_transmit(buffer[i]);
+    }
+}
+
+
+
+int main(void)
+{
+	uart_init(MYUBRR);
+
+	// MK → saída
+	DDRL  = 0b00111111;
+	PORTL = 0b00111111;
+
+	// BR → saída
+	DDRC  = 0b00111111;
+	PORTC = 0b00111111;
+
+	// T → entrada
+	DDRA  = 0x00;
+	PORTA = 0xFF;
+
+	uint8_t mk_last[6];
+	uint8_t br_last[6];
+
+	uint32_t tick = 0;
+
+	uint32_t mk_time[6][8];
+
+	for (uint8_t i = 0; i < 6; i++) {
+
+		mk_last[i] = 0xFF;
+		br_last[i] = 0xFF;
+
+		for (uint8_t t = 0; t < 8; t++)
+			mk_time[i][t] = 0;
+	}
+
+	for (;;) {
+
+		tick++;
+
+		for (uint8_t row = 0; row < 6; row++) {
+
+			//
+			// LEITURA BR (armação)
+			//
+
+			PORTC = 0x3F;
+			PORTC &= ~(1 << row);
+
+			for (volatile uint16_t d = 0; d < 50; d++);
+
+			uint8_t br = PINA;
+
+			uint8_t br_changed = br_last[row] ^ br;
+
+			for (uint8_t t = 0; t < 8; t++) {
+
+				// falling edge = tecla pressionada
+				if ((br_changed & (1 << t)) && !(br & (1 << t))) {
+					mk_time[row][t] = tick;
+				}
+			}
+
+			br_last[row] = br;
+
+			//
+			// LEITURA MK (disparo)
+			//
+
+			PORTL = 0x3F;
+			PORTL &= ~(1 << row);
+
+			for (volatile uint16_t d = 0; d < 50; d++);
+
+			uint8_t mk = PINA;
+
+			uint8_t mk_changed = mk_last[row] ^ mk;
+
+			for (uint8_t t = 0; t < 8; t++) {
+
+				// falling edge = evento de disparo
+				if ((mk_changed & (1 << t)) && !(mk & (1 << t))) {
+
+					if (mk_time[row][t]) {
+
+						uint32_t dt = tick - mk_time[row][t];
+
+						uart_print("MK=");
+						uart_print_hex(row + 5);
+
+						uart_print(" T=");
+						uart_print_hex(t);
+
+						uart_print(" DT=");
+						uart_print_uint32(dt);
+
+						uart_print("\r\n");
+
+						mk_time[row][t] = 0;
+					}
+				}
+			}
+
+			mk_last[row] = mk;
+		}
+	}
+}

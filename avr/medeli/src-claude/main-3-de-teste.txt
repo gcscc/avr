@@ -1,0 +1,180 @@
+// main.c - ATmega2560 @ 16 MHz, avr-gcc puro
+#define F_CPU 16000000UL
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <math.h>
+#include <stdint.h>
+#include <util/delay.h>
+
+#define BASE_NOTE   28           // E0
+#define SETTLE_CYC  0           // ciclos de espera por linha (16 = 1 us)
+#define DT_MIN_US   4000.0f      // -> velocity 127
+#define DT_MAX_US   66000.0f     // -> velocity 1
+#define T_DEBOUNCE  1250         // ticks de 4 us (5 ms): repique do 2o contato
+#define T_RETRIG    1000         // 4 ms: retrigger mínimo sem soltar a tecla
+#define T_STALE     7500         // 30 ms: 1o contato antigo, rearma
+
+enum { S_IDLE, S_ARMED, S_DOWN, S_REARM };
+
+static uint8_t  prev[20];
+static uint8_t  st[80];
+static uint16_t t0[80];
+static uint8_t  velA[2048];      // dt < 8,2 ms, passo 4 us
+static uint8_t  velB[512];       // dt >= 8,2 ms, passo 128 us
+
+/* ---------- UART0 (USB) com buffer circular ---------- */
+static volatile uint8_t txbuf[256];
+static volatile uint8_t txh, txt;
+
+ISR(USART0_UDRE_vect) {
+    UDR0 = txbuf[txt++];
+    if (txt == txh) UCSR0B &= ~(1 << UDRIE0);
+}
+static void putc_(char c) {
+    uint8_t nx = txh + 1;
+    if (nx != txt) { txbuf[txh] = c; txh = nx; }     // cheio: descarta
+}
+static void puts_(const char *s) { while (*s) putc_(*s++); }
+static void putu(uint16_t v) {
+    char b[5]; uint8_t n = 0;
+    do { b[n++] = '0' + v % 10; v /= 10; } while (v);
+    while (n) putc_(b[--n]);
+}
+static void puthex(uint8_t v) {
+    const char *h = "0123456789ABCDEF";
+    putc_(h[v >> 4]); putc_(h[v & 15]);
+}
+static inline void kick(void) { UCSR0B |= (1 << UDRIE0); }
+
+/* ---------- saída (trocar por MIDI depois) ---------- */
+static void note_on(uint8_t k, uint8_t vel, uint16_t dt) {
+    puts_("ON  n="); putu(BASE_NOTE + k);
+    puts_(" dt="); putu(dt > 16383 ? 65535u : (uint16_t)(dt << 2));
+    puts_("us v="); putu(vel); puts_("\r\n"); kick();
+}
+static void note_off(uint8_t k) {
+    puts_("OFF n="); putu(BASE_NOTE + k); puts_("\r\n"); kick();
+}
+static void orphan(uint8_t k) {
+    puts_("?   n="); putu(BASE_NOTE + k); puts_(" sem 1o contato\r\n"); kick();
+}
+
+/* ---------- velocity ---------- */
+static uint8_t curve(float us) {
+    float x = logf(us / DT_MIN_US) / logf(DT_MAX_US / DT_MIN_US);
+    if (x < 0.0f) x = 0.0f;
+    if (x > 1.0f) x = 1.0f;
+    return (uint8_t)(127.5f - x * 126.0f);           // 127..1
+}
+static inline uint8_t velocity(uint16_t dt) {        // dt em ticks de 4 us
+    if (dt < 2048) return velA[dt];
+    if (dt > 16500) return 1;                        // acima de 66 ms
+    dt >>= 5;
+    if (dt > 511) dt = 511;
+    return velB[dt];
+}
+
+/* ---------- máquina de estados por tecla ---------- */
+static void handle(uint8_t n, uint8_t cur, uint8_t diff, uint16_t now) {
+    uint8_t k0     = (n >> 1) << 3;
+    uint8_t second = n & 1;                          // linha ímpar = 2o contato
+    uint8_t other  = prev[n ^ 1];
+
+    for (uint8_t t = 0, bit = 1; diff; t++, bit <<= 1) {
+        if (!(diff & bit)) continue;
+        diff &= ~bit;
+        uint8_t  k  = k0 + t;
+        uint16_t dt = now - t0[k];
+        uint8_t  s  = st[k];
+
+        if (cur & bit) {                                         // fechou
+            if (!second) {
+                if (s == S_IDLE || s == S_REARM || (s == S_ARMED && dt > T_STALE)) {
+                    st[k] = S_ARMED; t0[k] = now;
+                }
+            } else if (s == S_ARMED || (s == S_REARM && dt >= T_RETRIG)) {
+                note_on(k, velocity(dt), dt);
+                st[k] = S_DOWN; t0[k] = now;
+            } else if (s == S_IDLE) {
+                orphan(k);
+            }
+        } else {                                                 // abriu
+            if (s == S_DOWN) {
+                if (second && dt < T_DEBOUNCE) continue;         // repique
+                note_off(k);
+                if (second && (other & bit)) { st[k] = S_REARM; t0[k] = now; }
+                else st[k] = S_IDLE;
+            } else if (!second && s == S_REARM) {
+                st[k] = S_IDLE;
+            }
+        }
+    }
+}
+
+static void __attribute__((noinline)) handle(uint8_t n, uint8_t cur, uint8_t diff, uint16_t now);  // protótipo antes de check
+
+static inline void check(uint8_t n, uint8_t cur) {
+    uint8_t diff = cur ^ prev[n];
+    if (__builtin_expect(diff, 0)) {
+        uint16_t now = TCNT1;
+        prev[n] = cur;
+        handle(n, cur, diff, now);
+    }
+}
+
+static inline void initLine(uint8_t n, uint8_t cur) { prev[n] = cur; }
+
+/* ---------- varredura: 1 linha em 0, resto em 1, lê PORTA ---------- */
+#define SCAN_PORT(PORT, NB, L0, ACT)                     \
+    do {                                                 \
+        uint8_t m = 0xFE;                                \
+        for (uint8_t i = 0; i < (NB); i++) {             \
+            PORT = m;                                    \
+            __builtin_avr_delay_cycles(SETTLE_CYC);      \
+            ACT((L0) + i, ~PINA);                        \
+            m = (uint8_t)((m << 1) | 1);                 \
+        }                                                \
+        PORT = 0xFF;                                     \
+    } while (0)
+
+#define SCAN_ALL(ACT)                                    \
+    do {                                                 \
+        SCAN_PORT(PORTC, 8, 0,  ACT);                    \
+        SCAN_PORT(PORTL, 8, 8,  ACT);                    \
+        SCAN_PORT(PORTK, 4, 16, ACT);                    \
+    } while (0)
+
+int main(void) {
+    PORTC = 0xFF; PORTL = 0xFF; PORTK = 0xFF;
+    DDRC = 0xFF; DDRL = 0xFF; DDRK = 0x0F;
+    DDRA = 0x00; PORTA = 0x00;                           // T: pull-up externo
+
+    TCCR1B = (1 << CS11) | (1 << CS10);                  // 4 us/tick
+    UBRR0 = 16; UCSR0A = (1 << U2X0);                    // 115200
+    UCSR0B = (1 << TXEN0);
+    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+
+    for (uint16_t i = 0; i < 2048; i++) velA[i] = curve(i * 4.0f + 2.0f);
+    for (uint16_t i = 0; i < 512;  i++) velB[i] = curve(i * 128.0f + 64.0f);
+
+    sei();
+
+    uint16_t a = TCNT1;                                  // mede a varredura
+    for (uint8_t i = 0; i < 100; i++) SCAN_ALL(initLine);
+    uint16_t b = TCNT1;
+    puts_("pronto, varredura = "); putu((b - a) / 25); puts_(" us\r\n");
+
+    for (uint8_t n = 0; n < 20; n++)                     // contatos presos em repouso
+        if (prev[n]) { puts_("preso linha "); putu(n); puts_(" T=0x"); puthex(prev[n]); puts_("\r\n"); }
+    kick();
+
+    uint16_t cnt = 0, tm = TCNT1;
+    for (;;) {
+        SCAN_ALL(initLine);
+        if (++cnt == 1000) {
+            uint16_t t = TCNT1;
+            puts_("1000 varreduras = "); putu(t - tm); puts_(" ticks\r\n"); kick();
+            cnt = 0; tm = TCNT1;
+        }
+    }
+}

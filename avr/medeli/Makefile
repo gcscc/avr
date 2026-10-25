@@ -1,20 +1,22 @@
 MCU=atmega2560
-F_CPU=16000000UL
 
-CC=avr-gcc
+F_CPU=16000000UL
+BAUD=115200
+
+CC=avr-gcc \
+	-DBAUD=$(BAUD) \
+
 OBJCOPY=avr-objcopy
 
 CFLAGS=\
--std=c17 \
 -mmcu=$(MCU) \
 -DF_CPU=$(F_CPU) \
 -Wall \
 -Wextra \
 -Wpedantic \
 -Os \
+-std=gnu99 \
 -Iinclude
-
-CFLAGS += -std=gnu23
 
 SRC=$(wildcard src/*.c)
 
@@ -24,11 +26,12 @@ all: $(TARGET).hex
 
 $(TARGET).elf: $(SRC)
 	mkdir -p build
-	$(CC) $(CFLAGS) $^ -o $@
+	$(CC) $(CFLAGS) $^ -o $@ -lm
 
 $(TARGET).hex: $(TARGET).elf
 	$(OBJCOPY) -O ihex -R .eeprom $< $@
 
+# SERIAL_DEVICE := /dev/cu.wchusbserial500
 SERIAL_DEVICE := /dev/ttyUSB0
 
 flash: $(TARGET).hex
@@ -36,9 +39,16 @@ flash: $(TARGET).hex
 	-p m2560 \
 	-c wiring \
 	-P $(SERIAL_DEVICE) \
-	-b 115200 \
+	-b $(BAUD) \
 	-D \
 	-U flash:w:$<:i
+
+scr:
+	# echo "Para sair: Ctrl-A Ctrl-K y"
+	screen $(SERIAL_DEVICE) $(BAUD)
+
+mon:
+	picocom -b $(BAUD) --nolock --echo $(SERIAL_DEVICE)
 
 clean:
 	rm -rf build

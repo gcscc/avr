@@ -84,7 +84,7 @@
 | 15 ✅    	|            	|            	| 13B | QH      	|                                    	| #070    |
 | 16 ✅    	|            	|            	| 15  | SH/LD   	|                                    	| #00f    |
 | 17 ✅    	|            	|            	| 7   | CLK      	|                                   	| #202    |
-| 18 ✅    	|            	|            	| 13M | QH       	|                                       | #555    |
+| 18 ✅    	|            	|            	| 13M | QH       	|                                     | #555    |
 | 19 🚫🚫 	| 🚫         	| 🚫         	|     | ESP      	| USB Data                           	|       	|
 | 20 🚫🚫 	| 🚫         	| 🚫         	|     | ESP      	| USB Data                           	|       	|
 | 26       	| 🚫         	| 🚫         	|     | ESP      	| SPI FLASH                          	|       	|
@@ -136,13 +136,13 @@ PL (Parallel Load ou Shift/Load): É o pino que alterna o estado do chip.
 Q7 (ou QH): É a saída serial de dados. É por este pino que os bits (referentes às 8 entradas) saem sequencialmente, bit a bit, a cada pulso de clock.
 
 | Pin	   | Description |
-|:--------:| ----------- |
-| D0…D7    |	Parallel input |
+|:------:| ----------- |
+| D0…D7  |	Parallel input |
 | PL	   | Parallel load (active low) |
 | CP	   | Serial clock |
 | CE	   | Clock enable (active low) |
 | Q7	   | Serial output |
-| Q7_N     | Inverted serial output (usually not used) |
+| Q7_N   | Inverted serial output (usually not used) |
 | DS	   | Serial input* |
 | GND	   | Ground |
 | VCC	   | Supply voltage |

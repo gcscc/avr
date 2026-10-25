@@ -1,0 +1,97 @@
+#include <avr/io.h>
+#include <util/delay.h>
+
+#define MYUBRR ((F_CPU / (8UL * BAUD)) - 1)
+
+void uart_init(unsigned int ubrr) {
+    // Turn on double speed mode
+    UCSR0A |= (1 << U2X0); 
+
+    // Set baud rate
+    UBRR0H = (unsigned char)(ubrr >> 8);
+    UBRR0L = (unsigned char)ubrr;
+    
+    // Enable Receiver and Transmitter
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+    
+    // Set frame format: 8 data bits, 1 stop bit
+    UCSR0C = (1 << UCSZ00) | (1 << UCSZ01);
+}
+
+void uart_transmit(unsigned char data) {
+    // Wait for empty transmit buffer
+    while (!(UCSR0A & (1 << UDRE0)));
+    
+    // Put data into buffer, sends the data
+    UDR0 = data;
+}
+
+void uart_print(const char *s) {
+    // Loop through string characters until the null terminator
+    while (*s) {
+        uart_transmit(*s);
+        s++;
+    }
+}
+
+void uart_print_hex(uint8_t v) {
+    // Split the byte into two nibbles
+    char hex_chars[] = "0123456789ABCDEF";
+    
+    // Transmit the upper 4 bits
+    uart_transmit(hex_chars[(v >> 4) & 0x0F]);
+    
+    // Transmit the lower 4 bits
+    uart_transmit(hex_chars[v & 0x0F]);
+}
+
+int main(void) {
+    // Initialize UART
+    uart_init(MYUBRR);
+    uart_print("Iniciando a bagaca\r\n"); 
+
+    DDRL  = 0b00111111; // PL0..PL5 output
+    PORTL = 0b00111111; // All high initially
+
+    DDRA  = 0x00;       // PORTA input
+    PORTA = 0xFF;       // Pullups enabled
+
+    // Use standard uint8_t array layout matching your original design
+    uint8_t last[6];
+    for (uint8_t i = 0; i < 6; i++) {
+        last[i] = 0xFF;
+    }
+
+    for (;;) {
+        for (uint8_t mk = 0; mk < 6; mk++) {
+
+            // Set all pins HIGH
+            PORTL = 0b00111111;
+
+            // Clear the bit to pull the target scanning column LOW
+            PORTL &= ~(1 << mk);
+
+            // CRITICAL FIX: Give the hardware traces a few microseconds to 
+            // physically discharge the internal pull-up voltage before sampling.
+            _delay_us(5); 
+
+            // Read the state of input pins
+            uint8_t t = PINA;
+
+            // Evaluate if state has altered from the previous scanning loop pass
+            if (t != last[mk]) {
+
+                uart_print("MK=");
+                uart_print_hex(mk + 5);
+
+                uart_print(" T=");
+                uart_print_hex(t);
+
+                uart_print("\r\n");
+
+                last[mk] = t;
+            }
+        }
+    }
+}
+
